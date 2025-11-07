@@ -110,23 +110,33 @@ This mode provides maximum size reduction but results in a WASM file that cannot
 
 ## Size Reduction Examples
 
-Based on a typical 1748-byte WASM file:
+Based on testapp.wasm (1748 bytes):
 
-| Mode | Stripped Size | Savings | Metadata Size |
-|------|--------------|---------|---------------|
+### Stripping Results
+
+| Mode | Stripped Size | Reduction | Metadata Size |
+|------|--------------|-----------|---------------|
 | Normal | 1571 bytes | 10.1% | 1865 bytes |
-| Aggressive | 1387 bytes | 20.7% | 2400 bytes |
+| Aggressive | 1387 bytes | 20.7% | 2451 bytes |
 
-### With Compression
+### Compression Results
 
-Applying `xz -9` compression to stripped files:
+Best compression of stripped files (vs original 1748 bytes):
 
-| Mode | Compressed Size | Total (with metadata) | vs Original |
-|------|----------------|----------------------|-------------|
-| Normal + xz | ~400 bytes | ~2265 bytes | 129% |
-| Aggressive + xz | ~350 bytes | ~2750 bytes | 157% |
+| Mode | Algorithm | Compressed Size | vs Original |
+|------|-----------|----------------|-------------|
+| Normal | zstd -19 | 891 bytes | 51.0% |
+| Normal | xz -9 | 900 bytes | 51.5% |
+| Normal | gzip -9 | 935 bytes | 53.5% |
+| Aggressive | zstd -19 | 755 bytes | 43.2% |
+| Aggressive | xz -9 | 772 bytes | 44.2% |
+| Aggressive | gzip -9 | 798 bytes | 45.7% |
 
-**Note**: For this small example, compression increases total size due to metadata overhead. For larger WASM files (>10KB), the combination of stripping and compression typically provides significant savings.
+**Key Findings:**
+- **Aggressive mode + zstd** achieves the best compression: **755 bytes (43.2% of original)**
+- Aggressive mode compresses ~15% better than normal mode
+- zstd provides the best compression ratio with fast decompression
+- For distribution, ship the compressed stripped WASM + metadata JSON separately
 
 ## Testing
 
@@ -164,7 +174,8 @@ Integrate into build systems to automatically strip debug information from produ
 - Custom sections (like the name section) are always discarded
 - Stripped WASM files cannot be validated without reassembly
 - Aggressive mode files cannot be inspected with standard WASM tools
-- For very small files, metadata overhead may exceed savings
+- Metadata must be distributed alongside the stripped WASM file
+- Best results achieved with larger WASM files (>10KB) where metadata overhead is proportionally smaller
 
 ## Technical Details
 
