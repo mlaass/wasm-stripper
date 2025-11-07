@@ -1,0 +1,8 @@
+*.bz2
+*.tar.bz2
+*.gz
+*.xz
+*.zst
+*.z
+test-*.wasm
+test-*.json

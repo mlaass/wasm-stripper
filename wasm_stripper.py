@@ -242,9 +242,17 @@ def write_export_section(writer: WASMWriter, exports: List[Dict]):
         writer.write_varuint(exp["index"])
 
 
-def strip_wasm(input_path: Path, output_wasm: Path, output_json: Path):
-    """Strip metadata from WASM file and save to JSON"""
-    print(f"Stripping {input_path}...")
+def strip_wasm(input_path: Path, output_wasm: Path, output_json: Path, aggressive: bool = False):
+    """Strip metadata from WASM file and save to JSON
+    
+    Args:
+        input_path: Input WASM file
+        output_wasm: Output stripped WASM file
+        output_json: Output metadata JSON file
+        aggressive: If True, only keep Code section. If False, keep Function/Table/Memory/Global/Element/Code/Data sections
+    """
+    mode = "aggressive" if aggressive else "normal"
+    print(f"Stripping {input_path} (mode: {mode})...")
 
     with open(input_path, "rb") as f:
         data = f.read()
@@ -273,31 +281,40 @@ def strip_wasm(input_path: Path, output_wasm: Path, output_json: Path):
 
         section_reader = WASMReader(section_data)
 
+        # Always strip these sections
         if section_id == SECTION_TYPE:
-            print("  Found TYPE section")
+            print("  Found TYPE section (storing as metadata)")
             types = parse_type_section(section_reader)
             metadata["sections"]["type"] = types
-            # Don't include in stripped version
 
         elif section_id == SECTION_IMPORT:
-            print("  Found IMPORT section")
+            print("  Found IMPORT section (storing as metadata)")
             imports = parse_import_section(section_reader)
             metadata["sections"]["import"] = imports
-            # Don't include in stripped version
 
         elif section_id == SECTION_EXPORT:
-            print("  Found EXPORT section")
+            print("  Found EXPORT section (storing as metadata)")
             exports = parse_export_section(section_reader)
             metadata["sections"]["export"] = exports
-            # Don't include in stripped version
 
         elif section_id == SECTION_CUSTOM:
             print("  Found CUSTOM section (skipping)")
             # Skip custom sections (like name section)
 
+        # In aggressive mode, strip everything except Code section
+        elif aggressive and section_id != SECTION_CODE:
+            print(f"  Found section {section_id} (storing as metadata - aggressive mode)")
+            # Store raw section data as base64 for sections we don't parse
+            import base64
+            metadata["sections"][f"section_{section_id}"] = {
+                "id": section_id,
+                "data": base64.b64encode(section_data).decode('ascii')
+            }
+
+        # In normal mode or if this is Code section, keep it
         else:
-            # Keep all other sections (function, code, memory, etc.)
-            print(f"  Found section {section_id} (keeping)")
+            action = "keeping" if not aggressive else "keeping (code section)"
+            print(f"  Found section {section_id} ({action})")
             stripped_sections.append({"id": section_id, "data": section_data})
 
     # Write stripped WASM
@@ -374,7 +391,7 @@ def reassemble_wasm(stripped_wasm: Path, metadata_json: Path, output_wasm: Path)
 
     # Copy sections from stripped WASM in correct order
     # WASM sections must be ordered: Type(1), Import(2), Function(3), Table(4), Memory(5), Global(6), Export(7), Start(8), Element(9), Code(10), Data(11)
-    # We need to insert Export(7) at the right position
+    # We need to insert sections from metadata at the right positions
     
     # First, read all sections from stripped WASM
     remaining_sections = []
@@ -384,27 +401,41 @@ def reassemble_wasm(stripped_wasm: Path, metadata_json: Path, output_wasm: Path)
         section_data = reader.read_bytes(section_size)
         remaining_sections.append({"id": section_id, "size": section_size, "data": section_data})
     
-    # Write sections in correct order
+    # Collect all sections from metadata (base64-encoded raw sections)
+    import base64
+    metadata_sections = {}
+    for key, value in metadata["sections"].items():
+        if key.startswith("section_"):
+            section_id = value["id"]
+            section_data = base64.b64decode(value["data"])
+            metadata_sections[section_id] = section_data
+    
+    # Merge and sort all sections by ID to maintain correct order
+    all_sections = []
+    
+    # Add sections from metadata
+    for section_id, section_data in metadata_sections.items():
+        all_sections.append({"id": section_id, "data": section_data, "source": "metadata"})
+    
+    # Add sections from stripped WASM
     for section in remaining_sections:
-        section_id = section["id"]
-        
-        # Before writing Export section (7), insert our restored Export section if we haven't yet
-        if section_id >= SECTION_EXPORT and "export" in metadata["sections"]:
-            print("  Restoring EXPORT section")
-            section_writer = WASMWriter()
-            write_export_section(section_writer, metadata["sections"]["export"])
-            
-            writer.write_u8(SECTION_EXPORT)
-            writer.write_varuint(len(section_writer.get_bytes()))
-            writer.write_bytes(section_writer.get_bytes())
-            
-            # Remove export from metadata so we don't write it again
-            del metadata["sections"]["export"]
-        
-        # Copy the section from stripped WASM
-        print(f"  Copying section {section_id}")
-        writer.write_u8(section_id)
-        writer.write_varuint(section["size"])
+        all_sections.append({"id": section["id"], "data": section["data"], "source": "stripped"})
+    
+    # Add export section if present
+    if "export" in metadata["sections"]:
+        section_writer = WASMWriter()
+        write_export_section(section_writer, metadata["sections"]["export"])
+        all_sections.append({"id": SECTION_EXPORT, "data": section_writer.get_bytes(), "source": "metadata"})
+    
+    # Sort by section ID to maintain WASM ordering
+    all_sections.sort(key=lambda s: s["id"])
+    
+    # Write all sections in order
+    for section in all_sections:
+        source_label = f" (from {section['source']})"
+        print(f"  Writing section {section['id']}{source_label}")
+        writer.write_u8(section["id"])
+        writer.write_varuint(len(section["data"]))
         writer.write_bytes(section["data"])
 
     with open(output_wasm, "wb") as f:
@@ -435,6 +466,7 @@ Examples:
     strip_parser.add_argument("input", type=Path, help="Input WASM file")
     strip_parser.add_argument("-o", "--output", type=Path, required=True, help="Output stripped WASM file")
     strip_parser.add_argument("-m", "--metadata", type=Path, required=True, help="Output metadata JSON file")
+    strip_parser.add_argument("-a", "--aggressive", action="store_true", help="Aggressive mode: only keep Code section, store everything else as metadata")
 
     # Reassemble command
     reassemble_parser = subparsers.add_parser("reassemble", help="Reassemble WASM from stripped version and metadata")
@@ -445,7 +477,7 @@ Examples:
     args = parser.parse_args()
 
     if args.command == "strip":
-        strip_wasm(args.input, args.output, args.metadata)
+        strip_wasm(args.input, args.output, args.metadata, aggressive=args.aggressive)
     elif args.command == "reassemble":
         reassemble_wasm(args.stripped, args.metadata, args.output)
     else:
